@@ -18,7 +18,9 @@
         "backgroundColor": "#1a1a2e"
       },
       "package": "com.pokemontcgscanner.app",
-      "permissions": ["CAMERA"]
+      "permissions": [
+        "CAMERA"
+      ]
     },
     "plugins": [
       "expo-router",
@@ -27,7 +29,9 @@
         {
           "cameraPermission": "Allow Pokemon TCG Scanner to use the camera to scan cards."
         }
-      ]
+      ],
+      "expo-font",
+      "expo-sqlite"
     ],
     "experiments": {
       "typedRoutes": true
