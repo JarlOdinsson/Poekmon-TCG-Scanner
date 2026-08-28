@@ -6,6 +6,8 @@ import androidx.lifecycle.viewModelScope
 import com.pokemontcgscanner.app.data.AllocationEntity
 import com.pokemontcgscanner.app.data.AppRepository
 import com.pokemontcgscanner.app.data.CardEntity
+import com.pokemontcgscanner.app.data.CardVariant
+import com.pokemontcgscanner.app.data.ConfirmedAllocation
 import com.pokemontcgscanner.app.data.InventoryTotal
 import com.pokemontcgscanner.app.data.LocationEntity
 import com.pokemontcgscanner.app.data.ScanSessionEntity
@@ -50,22 +52,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun endSession(session: ScanSessionEntity) = viewModelScope.launch { repository.endSession(session.id) }
 
-    fun addCard(card: CardEntity, variant: String, quantity: Int, location: Long, status: String = "AVAILABLE", onDone: () -> Unit = {}) =
-        viewModelScope.launch {
-            repository.addCard(card.id, variant, location, status, quantity.coerceAtLeast(1), activeSession.value?.id)
-            onDone()
-        }
+    suspend fun variantsFor(cardId: String): List<CardVariant> = repository.variantsFor(cardId)
+
+    fun confirmAllocation(
+        confirmation: ConfirmedAllocation,
+        status: String = "AVAILABLE",
+        sessionId: Long? = activeSession.value?.id,
+        reviewItemId: Long? = null,
+        imagePath: String? = null,
+        onDone: () -> Unit = {}
+    ) = viewModelScope.launch {
+        repository.confirmAllocation(confirmation, status, sessionId, reviewItemId)
+        if (reviewItemId != null && imagePath != null) runCatching { File(imagePath).delete() }
+        onDone()
+    }
 
     fun queueReview(imagePath: String, candidates: List<CardEntity>, onDone: () -> Unit = {}) = viewModelScope.launch {
         repository.queueReview(activeSession.value?.id, imagePath, candidates.map { it.id })
         onDone()
     }
 
-    fun resolveReview(itemId: Long, imagePath: String, card: CardEntity, location: Long, onDone: () -> Unit = {}) = viewModelScope.launch {
-        repository.addCard(card.id, card.variants.substringBefore(','), location, "AVAILABLE", 1, activeSession.value?.id)
-        repository.resolveReview(itemId)
-        runCatching { File(imagePath).delete() }
-        onDone()
+    fun resolveAllocationVariant(allocationId: Long, variant: CardVariant) = viewModelScope.launch {
+        repository.resolveAllocationVariant(allocationId, variant)
     }
 
     fun moveAllocation(allocationId: Long, quantity: Int, destinationId: Long) = viewModelScope.launch {

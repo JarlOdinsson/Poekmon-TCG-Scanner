@@ -26,10 +26,16 @@ data class CardEntity(
     val regulationMark: String,
     val artist: String,
     val language: String = "en",
-    val variants: String = "Unknown",
     val standardLegal: Boolean = false,
     val expandedLegal: Boolean = false,
     val imageUrl: String = ""
+)
+
+data class CardVariant(
+    val id: String,
+    val cardId: String,
+    val sourceId: String?,
+    val displayName: String
 )
 
 class CardDao internal constructor(private val context: Context) {
@@ -59,6 +65,30 @@ class CardDao internal constructor(private val context: Context) {
         }
     }
 
+    suspend fun variantsFor(cardId: String): List<CardVariant> = withContext(Dispatchers.IO) {
+        ensureInstalled()
+        openReadOnly().use { database ->
+            database.rawQuery(
+                """SELECT id,card_id,source_variant_id,display_name
+                   FROM card_variants WHERE card_id=? ORDER BY display_name,id""",
+                arrayOf(cardId)
+            ).use { cursor ->
+                buildList(cursor.count) {
+                    while (cursor.moveToNext()) {
+                        add(
+                            CardVariant(
+                                id = cursor.getString(0),
+                                cardId = cursor.getString(1),
+                                sourceId = cursor.getString(2)?.ifBlank { null },
+                                displayName = cursor.getString(3)
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     private fun loadAll(): List<CardEntity> {
         ensureInstalled()
         return openReadOnly().use { database ->
@@ -79,7 +109,7 @@ class CardDao internal constructor(private val context: Context) {
                     setName = text("setName"), setCode = text("setCode"), collectorNumber = text("collectorNumber"),
                     supertype = text("supertype"), subtypes = text("subtypes"), types = text("types"),
                     rarity = text("rarity"), regulationMark = text("regulationMark"), artist = text("artist"),
-                    language = text("language"), variants = text("variants").ifBlank { "Unknown" },
+                    language = text("language"),
                     standardLegal = cursor.getInt(columns.getValue("standardLegal")) == 1,
                     expandedLegal = cursor.getInt(columns.getValue("expandedLegal")) == 1,
                     imageUrl = text("imageUrl")

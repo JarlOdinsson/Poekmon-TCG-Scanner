@@ -5,6 +5,7 @@ import android.content.Intent
 import androidx.core.content.FileProvider
 import com.pokemontcgscanner.app.CollectionSnapshot
 import java.io.File
+import org.json.JSONObject
 
 object ExportService {
     fun share(context: Context, snapshot: CollectionSnapshot) {
@@ -14,17 +15,17 @@ object ExportService {
         val cardById = snapshot.cards.associateBy { it.id }
         val locationById = snapshot.locations.associateBy { it.id }
         csv.writeText(buildString {
-            appendLine("card_id,name,set,number,variant,quantity,location,status")
+            appendLine("card_id,name,set,number,variant_id,variant_display_name,variant_resolution,quantity,location,status")
             snapshot.allocations.forEach { row ->
                 val card = cardById[row.cardId]
-                appendLine(listOf(row.cardId, card?.name, card?.setName, card?.collectorNumber, row.variant, row.quantity, locationById[row.locationId]?.name, row.status).joinToString(",") { "\"${it.toString().replace("\"", "\"\"")}\"" })
+                appendLine(listOf(row.cardId, card?.name, card?.setName, card?.collectorNumber, row.variantId, row.variantDisplayName, row.variantResolution, row.quantity, locationById[row.locationId]?.name, row.status).joinToString(",") { "\"${(it ?: "").toString().replace("\"", "\"\"")}\"" })
             }
         })
         json.writeText(buildString {
             append("{\"exportedAt\":${System.currentTimeMillis()},\"inventory\":[")
             snapshot.allocations.forEachIndexed { index, row ->
                 if (index > 0) append(',')
-                append("{\"cardId\":\"${row.cardId}\",\"variant\":\"${row.variant}\",\"quantity\":${row.quantity},\"locationId\":${row.locationId},\"status\":\"${row.status}\"}")
+                append("{\"cardId\":${JSONObject.quote(row.cardId)},\"variantId\":${row.variantId?.let(JSONObject::quote) ?: "null"},\"variantDisplayName\":${JSONObject.quote(row.variantDisplayName)},\"variantResolution\":${JSONObject.quote(row.variantResolution)},\"quantity\":${row.quantity},\"locationId\":${row.locationId},\"status\":${JSONObject.quote(row.status)}}")
             }
             append("]}")
         })

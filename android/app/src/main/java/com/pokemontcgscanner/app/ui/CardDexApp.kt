@@ -65,6 +65,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -83,6 +84,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -95,9 +97,13 @@ import coil.compose.AsyncImage
 import com.pokemontcgscanner.app.AppViewModel
 import com.pokemontcgscanner.app.CollectionSnapshot
 import com.pokemontcgscanner.app.data.CardEntity
+import com.pokemontcgscanner.app.data.CardVariant
+import com.pokemontcgscanner.app.data.AllocationConfirmation
+import com.pokemontcgscanner.app.data.ConfirmedAllocation
 import com.pokemontcgscanner.app.data.InventoryTotal
 import com.pokemontcgscanner.app.data.LocationEntity
 import com.pokemontcgscanner.app.data.AllocationEntity
+import com.pokemontcgscanner.app.data.ReviewItemEntity
 import com.pokemontcgscanner.app.export.ExportService
 import com.pokemontcgscanner.app.scanner.CardRecognitionEngine
 import com.pokemontcgscanner.app.scanner.CardRecognitionResult
@@ -209,6 +215,125 @@ private fun CardTile(card: CardEntity, owned: Int, modifier: Modifier = Modifier
     }
 }
 
+private fun variantLabel(variant: CardVariant, all: List<CardVariant>): String {
+    val collides = all.count { it.displayName == variant.displayName } > 1
+    val identityHint = variant.sourceId?.take(8) ?: variant.id.takeLast(8)
+    return if (collides) "${variant.displayName} · ID $identityHint" else variant.displayName
+}
+
+@Composable
+private fun VariantConfirmation(
+    card: CardEntity,
+    variants: List<CardVariant>,
+    locations: List<LocationEntity>,
+    initialLocationId: Long,
+    onConfirm: (ConfirmedAllocation) -> Unit,
+    onCancel: () -> Unit
+) {
+    var selectedVariantId by remember(card.id, variants) {
+        mutableStateOf(variants.singleOrNull()?.id)
+    }
+    var selectedLocation by remember(card.id, initialLocationId) { mutableStateOf(initialLocationId) }
+    var quantity by remember(card.id) { mutableStateOf(1) }
+    val confirmation = AllocationConfirmation.create(card.id, selectedVariantId, variants, quantity, selectedLocation)
+
+    LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                AsyncImage(model = card.imageUrl, contentDescription = card.name, modifier = Modifier.size(112.dp, 157.dp))
+                Column {
+                    Text(card.name, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                    Text("${card.setName} · ${card.setCode} ${card.collectorNumber}")
+                    Text(card.rarity, color = MaterialTheme.colorScheme.secondary)
+                }
+            }
+        }
+        item {
+            Text("Variant", fontWeight = FontWeight.Bold)
+            if (variants.isEmpty()) {
+                Text("No source-supported physical variant is available. This card cannot be confirmed with a fabricated Unknown identity.", color = MaterialTheme.colorScheme.error)
+            } else {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(variants, key = { it.id }) { variant ->
+                        FilterChip(
+                            selected = selectedVariantId == variant.id,
+                            onClick = { selectedVariantId = variant.id },
+                            label = { Text(variantLabel(variant, variants)) }
+                        )
+                    }
+                }
+                if (variants.size > 1 && selectedVariantId == null) {
+                    Text("Choose the exact physical variant before confirming.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        item {
+            Text("Destination", fontWeight = FontWeight.Bold)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(locations, key = { it.id }) { location ->
+                    FilterChip(selected = selectedLocation == location.id, onClick = { selectedLocation = location.id }, label = { Text(location.name) })
+                }
+            }
+        }
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                Text("Quantity", fontWeight = FontWeight.Bold)
+                OutlinedButton(onClick = { quantity = (quantity - 1).coerceAtLeast(1) }) { Text("−") }
+                Text(quantity.toString(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                OutlinedButton(onClick = { quantity++ }) { Text("+") }
+            }
+        }
+        item { Button(onClick = { confirmation?.let(onConfirm) }, enabled = confirmation != null, modifier = Modifier.fillMaxWidth().height(54.dp)) { Text("Confirm and put away") } }
+        item { OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) { Text("Cancel") } }
+    }
+}
+
+@Composable
+private fun VariantConfirmationDialog(
+    vm: AppViewModel,
+    card: CardEntity,
+    locations: List<LocationEntity>,
+    initialLocationId: Long,
+    onConfirm: (ConfirmedAllocation) -> Unit,
+    onCancel: () -> Unit
+) {
+    var variants by remember(card.id) { mutableStateOf<List<CardVariant>>(emptyList()) }
+    LaunchedEffect(card.id) { variants = vm.variantsFor(card.id) }
+    Dialog(onDismissRequest = onCancel) {
+        Surface(shape = RoundedCornerShape(18.dp), tonalElevation = 6.dp, modifier = Modifier.fillMaxWidth().fillMaxHeight(0.9f)) {
+            VariantConfirmation(card, variants, locations, initialLocationId, onConfirm, onCancel)
+        }
+    }
+}
+
+@Composable
+private fun ResolveLegacyVariantDialog(
+    vm: AppViewModel,
+    allocation: AllocationEntity,
+    card: CardEntity,
+    onResolved: (CardVariant) -> Unit,
+    onCancel: () -> Unit
+) {
+    var variants by remember(card.id) { mutableStateOf<List<CardVariant>>(emptyList()) }
+    var selectedId by remember(card.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(card.id) { variants = vm.variantsFor(card.id) }
+    val selected = variants.singleOrNull { it.id == selectedId }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Resolve ${card.name} variant") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("${allocation.quantity} cards in this location remain preserved as “${allocation.variantDisplayName}”. Choose the exact catalogue variant.")
+                variants.forEach { variant ->
+                    FilterChip(selected = selectedId == variant.id, onClick = { selectedId = variant.id }, label = { Text(variantLabel(variant, variants)) })
+                }
+            }
+        },
+        confirmButton = { Button(onClick = { selected?.let(onResolved) }, enabled = selected != null) { Text("Resolve without changing quantity") } },
+        dismissButton = { OutlinedButton(onClick = onCancel) { Text("Cancel") } }
+    )
+}
+
 @Composable
 private fun StorageScreen(vm: AppViewModel) {
     val cards by vm.catalog.collectAsStateWithLifecycle(); val totals by vm.totals.collectAsStateWithLifecycle()
@@ -216,7 +341,8 @@ private fun StorageScreen(vm: AppViewModel) {
     val reviewItems by vm.reviewItems.collectAsStateWithLifecycle(); val sessions by vm.sessionSummaries.collectAsStateWithLifecycle()
     var name by remember { mutableStateOf("") }; var type by remember { mutableStateOf("BINDER") }
     var moving by remember { mutableStateOf<AllocationEntity?>(null) }; var moveQuantity by remember { mutableStateOf(1) }; var moveDestination by remember { mutableStateOf(0L) }
-    var reviewId by remember { mutableStateOf<Long?>(null) }; var reviewPath by remember { mutableStateOf("") }; var reviewCard by remember { mutableStateOf<CardEntity?>(null) }; var reviewDestination by remember { mutableStateOf(0L) }
+    var reviewItem by remember { mutableStateOf<ReviewItemEntity?>(null) }; var reviewCard by remember { mutableStateOf<CardEntity?>(null) }
+    var resolvingAllocation by remember { mutableStateOf<AllocationEntity?>(null) }
     val context = LocalContext.current
 
     moving?.let { allocation ->
@@ -228,8 +354,32 @@ private fun StorageScreen(vm: AppViewModel) {
             }
         }, confirmButton = { Button(onClick = { vm.moveAllocation(allocation.id, moveQuantity, moveDestination); moving = null }, enabled = moveDestination != 0L) { Text("Move") } }, dismissButton = { OutlinedButton(onClick = { moving = null }) { Text("Cancel") } })
     }
-    if (reviewId != null && reviewCard != null) {
-        AlertDialog(onDismissRequest = { reviewId = null }, title = { Text("Resolve as ${reviewCard!!.name}") }, text = { Column { Text("Choose the physical destination"); locations.forEach { location -> FilterChip(selected = reviewDestination == location.id, onClick = { reviewDestination = location.id }, label = { Text(location.name) }) } } }, confirmButton = { Button(onClick = { vm.resolveReview(reviewId!!, reviewPath, reviewCard!!, reviewDestination); reviewId = null }, enabled = reviewDestination != 0L) { Text("Resolve") } }, dismissButton = { OutlinedButton(onClick = { reviewId = null }) { Text("Cancel") } })
+    if (reviewItem != null && reviewCard != null) {
+        val item = reviewItem!!
+        VariantConfirmationDialog(
+            vm = vm,
+            card = reviewCard!!,
+            locations = locations,
+            initialLocationId = locations.firstOrNull()?.id ?: 0L,
+            onConfirm = { confirmation ->
+                vm.confirmAllocation(
+                    confirmation = confirmation,
+                    sessionId = item.sessionId,
+                    reviewItemId = item.id,
+                    imagePath = item.imagePath
+                ) { reviewItem = null; reviewCard = null }
+            },
+            onCancel = { reviewItem = null; reviewCard = null }
+        )
+    }
+    resolvingAllocation?.let { allocation ->
+        cards.firstOrNull { it.id == allocation.cardId }?.let { card ->
+            ResolveLegacyVariantDialog(
+                vm, allocation, card,
+                onResolved = { variant -> vm.resolveAllocationVariant(allocation.id, variant); resolvingAllocation = null },
+                onCancel = { resolvingAllocation = null }
+            )
+        }
     }
 
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -241,13 +391,28 @@ private fun StorageScreen(vm: AppViewModel) {
                 Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) { AsyncImage(model = File(review.imagePath), contentDescription = "Captured card", modifier = Modifier.size(80.dp, 112.dp).clip(RoundedCornerShape(8.dp))); Column { Text("Needs exact printing", fontWeight = FontWeight.Bold); Text(DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(review.createdAt)), style = MaterialTheme.typography.labelSmall); Text("Tap a candidate to resolve", color = MaterialTheme.colorScheme.onSurfaceVariant) } }
                     if (candidateCards.isEmpty()) Text("No OCR candidates — rescan or wait for manual search support.")
-                    else LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) { items(candidateCards) { card -> FilledTonalButton(onClick = { reviewId = review.id; reviewPath = review.imagePath; reviewCard = card; reviewDestination = locations.firstOrNull()?.id ?: 0L }) { Text("${card.name} ${card.setCode} ${card.collectorNumber}") } } }
+                    else LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) { items(candidateCards) { card -> FilledTonalButton(onClick = { reviewItem = review; reviewCard = card }) { Text("${card.name} ${card.setCode} ${card.collectorNumber}") } } }
                 } }
             }
         }
         items(locations, key = { it.id }) { location ->
             val rows = allocations.filter { it.locationId == location.id }; val qty = rows.sumOf { it.quantity }
-            Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp)) { Row(verticalAlignment = Alignment.CenterVertically) { Box(Modifier.size(12.dp).background(Color(location.color), CircleShape)); Spacer(Modifier.size(10.dp)); Column(Modifier.weight(1f)) { Text(location.name, fontWeight = FontWeight.Bold); Text(location.type, style = MaterialTheme.typography.labelSmall) }; Text("$qty cards") }; rows.take(5).forEach { row -> val card = cards.firstOrNull { it.id == row.cardId }; Row(Modifier.fillMaxWidth().clickable { moving = row; moveQuantity = 1; moveDestination = locations.firstOrNull { it.id != row.locationId }?.id ?: 0L }.padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) { Text("${card?.name ?: row.cardId} · ${row.variant}", style = MaterialTheme.typography.bodySmall); Text("×${row.quantity}  Move", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall) } } } }
+            Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) { Box(Modifier.size(12.dp).background(Color(location.color), CircleShape)); Spacer(Modifier.size(10.dp)); Column(Modifier.weight(1f)) { Text(location.name, fontWeight = FontWeight.Bold); Text(location.type, style = MaterialTheme.typography.labelSmall) }; Text("$qty cards") }
+                rows.take(5).forEach { row ->
+                    val card = cards.firstOrNull { it.id == row.cardId }
+                    Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("${card?.name ?: row.cardId} · ${row.variantDisplayName}", style = MaterialTheme.typography.bodySmall)
+                            if (row.variantId == null) Text("Variant needs review: ${row.variantResolution.lowercase()}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            if (row.variantId == null && card != null) OutlinedButton(onClick = { resolvingAllocation = row }) { Text("Resolve") }
+                            OutlinedButton(onClick = { moving = row; moveQuantity = 1; moveDestination = locations.firstOrNull { it.id != row.locationId }?.id ?: 0L }) { Text("×${row.quantity} Move") }
+                        }
+                    }
+                }
+            } }
         }
         if (sessions.isNotEmpty()) {
             item { HorizontalDivider(); SectionTitle("Scan history", "Recent sessions") }
@@ -269,7 +434,8 @@ private fun ScannerScreen(vm: AppViewModel) {
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { permission = it }
     var destination by remember(locations) { mutableStateOf(locations.firstOrNull()?.id ?: 0L) }; var sessionName by remember { mutableStateOf("Quick Scan") }
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }; var phase by remember { mutableStateOf(ScanPhase.READY) }; var imagePath by remember { mutableStateOf("") }; var hint by remember { mutableStateOf("") }
-    var selectedCard by remember { mutableStateOf<CardEntity?>(null) }; var selectedVariant by remember { mutableStateOf("Normal") }; var selectedLocation by remember { mutableStateOf(0L) }; var selectedQuantity by remember { mutableStateOf(1) }
+    var selectedCard by remember { mutableStateOf<CardEntity?>(null) }
+    var selectedVariants by remember { mutableStateOf<List<CardVariant>>(emptyList()) }
     var recognition by remember { mutableStateOf<CardRecognitionResult?>(null) }
     val recognitionEngine = remember { CardRecognitionEngine(context.applicationContext) }
     val manuallyFiltered = cards.filter { hint.isBlank() || it.name.contains(hint, true) || it.collectorNumber.startsWith(hint) || it.setName.contains(hint, true) }
@@ -280,6 +446,9 @@ private fun ScannerScreen(vm: AppViewModel) {
             recognition = recognitionEngine.recognize(imagePath, cards)
             phase = ScanPhase.CAPTURED
         }
+    }
+    LaunchedEffect(selectedCard?.id) {
+        selectedVariants = selectedCard?.let { vm.variantsFor(it.id) } ?: emptyList()
     }
 
     if (session == null) {
@@ -320,19 +489,20 @@ private fun ScannerScreen(vm: AppViewModel) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 OutlinedTextField(value = hint, onValueChange = { hint = it }, leadingIcon = { Icon(Icons.Default.Search, null) }, label = { Text("Card name, set, or number") }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
-                LazyVerticalGrid(columns = GridCells.Fixed(2), modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { items(candidates, key = { it.id }) { card -> CardTile(card, 0, Modifier.fillMaxWidth(), onClick = { selectedCard = card; selectedVariant = card.variants.substringBefore(','); selectedLocation = currentSession.destinationId; selectedQuantity = 1; phase = ScanPhase.SELECTING }) } }
+                LazyVerticalGrid(columns = GridCells.Fixed(2), modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { items(candidates, key = { it.id }) { card -> CardTile(card, 0, Modifier.fillMaxWidth(), onClick = { selectedCard = card; selectedVariants = emptyList(); phase = ScanPhase.SELECTING }) } }
                 Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { OutlinedButton(onClick = { phase = ScanPhase.READY }, modifier = Modifier.weight(1f)) { Text("Retake") }; FilledTonalButton(onClick = { vm.queueReview(imagePath, candidates) { phase = ScanPhase.CONFIRMED } }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.Warning, null); Text(" Review later") } }
             }
             ScanPhase.SELECTING -> {
                 val card = selectedCard
-                if (card == null) { LaunchedEffect(Unit) { phase = ScanPhase.CAPTURED } } else LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    item { Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) { AsyncImage(model = card.imageUrl, contentDescription = card.name, modifier = Modifier.size(132.dp, 185.dp)); Column { Text(card.name, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold); Text("${card.setName} · ${card.setCode} ${card.collectorNumber}"); Text(card.rarity, color = MaterialTheme.colorScheme.secondary) } } }
-                    item { Text("Variant", fontWeight = FontWeight.Bold); LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) { items(card.variants.split(',')) { variant -> FilterChip(selected = selectedVariant == variant, onClick = { selectedVariant = variant }, label = { Text(variant) }) } } }
-                    item { Text("Destination", fontWeight = FontWeight.Bold); LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) { items(locations) { location -> FilterChip(selected = selectedLocation == location.id, onClick = { selectedLocation = location.id }, label = { Text(location.name) }) } } }
-                    item { Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(18.dp)) { Text("Quantity", fontWeight = FontWeight.Bold); OutlinedButton(onClick = { selectedQuantity = (selectedQuantity - 1).coerceAtLeast(1) }) { Text("−") }; Text(selectedQuantity.toString(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); OutlinedButton(onClick = { selectedQuantity++ }) { Text("+") } } }
-                    item { Button(onClick = { vm.addCard(card, selectedVariant, selectedQuantity, selectedLocation) { phase = ScanPhase.CONFIRMED } }, enabled = selectedLocation != 0L, modifier = Modifier.fillMaxWidth().height(54.dp)) { Text("Confirm and put away") } }
-                    item { OutlinedButton(onClick = { phase = ScanPhase.CAPTURED }, modifier = Modifier.fillMaxWidth()) { Text("Back to candidates") } }
-                }
+                if (card == null) { LaunchedEffect(Unit) { phase = ScanPhase.CAPTURED } }
+                else VariantConfirmation(
+                    card = card,
+                    variants = selectedVariants,
+                    locations = locations,
+                    initialLocationId = currentSession.destinationId,
+                    onConfirm = { confirmation -> vm.confirmAllocation(confirmation) { phase = ScanPhase.CONFIRMED } },
+                    onCancel = { phase = ScanPhase.CAPTURED }
+                )
             }
             ScanPhase.CONFIRMED -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) { Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF48C78E), modifier = Modifier.size(72.dp)); Text("Saved", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold); Text("Remove the card before re-arming."); Button(onClick = { phase = ScanPhase.READY; hint = ""; imagePath = ""; recognition = null }) { Text("Card removed — scan next") } } }
         }

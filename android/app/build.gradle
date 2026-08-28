@@ -12,6 +12,12 @@ android {
         targetSdk 35
         versionCode 2
         versionName '0.2.0'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+        javaCompileOptions {
+            annotationProcessorOptions {
+                arguments += ['room.schemaLocation': "$projectDir/schemas".toString(), 'room.incremental': 'true']
+            }
+        }
     }
 
     buildFeatures { compose true; buildConfig true }
@@ -22,6 +28,7 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
     packaging { resources.excludes += '/META-INF/{AL2.0,LGPL2.1}' }
+    sourceSets { androidTest.assets.srcDirs += files("$projectDir/schemas") }
 
     signingConfigs {
         debug {
@@ -65,6 +72,9 @@ dependencies {
     implementation 'io.coil-kt:coil-compose:2.7.0'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
     testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test:core:1.6.1'
+    androidTestImplementation 'androidx.test:runner:1.6.2'
     debugImplementation 'androidx.compose.ui:ui-tooling'
 }
 

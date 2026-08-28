@@ -19,9 +19,8 @@ class AppRepository(context: Context) {
     val sessionSummaries: Flow<List<SessionSummary>> = collection.observeSessionSummaries()
 
     suspend fun initialize() {
-        // Forces version/checksum installation of the read-only catalogue asset.
-        // This never opens or migrates the separate user collection database.
         cards.count()
+        reconcileLegacyAllocations()
         if (collection.locationCount() == 0) {
             listOf(
                 LocationEntity(name = "Unassigned", type = "UNASSIGNED", color = 0xFF7E8799),
@@ -33,6 +32,7 @@ class AppRepository(context: Context) {
     }
 
     suspend fun search(query: String): List<CardEntity> = cards.search(query.trim())
+    suspend fun variantsFor(cardId: String): List<CardVariant> = cards.variantsFor(cardId)
 
     suspend fun createLocation(name: String, type: String): Long =
         collection.insertLocation(LocationEntity(name = name.trim(), type = type))
@@ -42,39 +42,134 @@ class AppRepository(context: Context) {
 
     suspend fun endSession(id: Long) = collection.endSession(id, System.currentTimeMillis())
 
-    suspend fun addCard(cardId: String, variant: String, locationId: Long, status: String, quantity: Int, sessionId: Long?) {
-        val old = collection.allocation(cardId, variant, locationId, status)
-        collection.upsertAllocation(
-            old?.copy(quantity = old.quantity + quantity, updatedAt = System.currentTimeMillis())
-                ?: AllocationEntity(cardId = cardId, variant = variant, locationId = locationId, status = status, quantity = quantity)
+    suspend fun confirmAllocation(
+        confirmation: ConfirmedAllocation,
+        status: String,
+        sessionId: Long?,
+        reviewItemId: Long?
+    ) = collectionDb.withTransaction {
+        val existing = collection.resolvedAllocation(
+            confirmation.cardId, confirmation.variantId, confirmation.locationId, status
         )
-        if (sessionId != null) {
-            collection.insertEvent(ScanEventEntity(sessionId = sessionId, cardId = cardId, variant = variant, quantity = quantity, confidence = 1f))
+        if (existing == null) {
+            collection.insertAllocation(
+                AllocationEntity(
+                    cardId = confirmation.cardId,
+                    variantId = confirmation.variantId,
+                    variantDisplayName = confirmation.variantDisplayName,
+                    locationId = confirmation.locationId,
+                    status = status,
+                    quantity = confirmation.quantity
+                )
+            )
+        } else {
+            collection.updateAllocation(
+                existing.copy(
+                    variantDisplayName = confirmation.variantDisplayName,
+                    quantity = existing.quantity + confirmation.quantity,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
         }
+        if (sessionId != null) {
+            collection.insertEvent(
+                ScanEventEntity(
+                    sessionId = sessionId,
+                    cardId = confirmation.cardId,
+                    variantId = confirmation.variantId,
+                    variantDisplayName = confirmation.variantDisplayName,
+                    quantity = confirmation.quantity,
+                    confidence = 1f
+                )
+            )
+        }
+        if (reviewItemId != null) collection.resolveReviewItem(reviewItemId)
     }
 
     suspend fun queueReview(sessionId: Long?, imagePath: String, candidates: List<String>) {
         collection.insertReviewItem(
-            ReviewItemEntity(sessionId = sessionId, imagePath = imagePath, candidateIds = candidates.joinToString(","), note = "Needs exact printing confirmation")
+            ReviewItemEntity(
+                sessionId = sessionId,
+                imagePath = imagePath,
+                candidateIds = candidates.joinToString(","),
+                note = "Needs exact printing and variant confirmation"
+            )
         )
     }
 
-    suspend fun resolveReview(itemId: Long) = collection.resolveReviewItem(itemId)
+    suspend fun resolveAllocationVariant(allocationId: Long, variant: CardVariant) {
+        collectionDb.withTransaction {
+            val source = collection.allocationById(allocationId) ?: return@withTransaction
+            if (source.cardId != variant.cardId || source.variantId != null) return@withTransaction
+            mergeOrResolve(source, variant)
+        }
+    }
+
+    private suspend fun reconcileLegacyAllocations() {
+        collection.unresolvedAllocations().forEach { legacy ->
+            val decision = VariantIdentity.reconcile(legacy.variantDisplayName, cards.variantsFor(legacy.cardId))
+            collectionDb.withTransaction {
+                val current = collection.allocationById(legacy.id) ?: return@withTransaction
+                if (current.variantId != null) return@withTransaction
+                when (decision) {
+                    is LegacyVariantDecision.Resolved -> mergeOrResolve(current, decision.variant)
+                    LegacyVariantDecision.Ambiguous -> collection.updateAllocation(
+                        current.copy(variantResolution = VariantResolutionState.AMBIGUOUS, updatedAt = System.currentTimeMillis())
+                    )
+                    LegacyVariantDecision.Unmatched -> collection.updateAllocation(
+                        current.copy(variantResolution = VariantResolutionState.UNMATCHED, updatedAt = System.currentTimeMillis())
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun mergeOrResolve(source: AllocationEntity, variant: CardVariant) {
+        val destination = collection.resolvedAllocation(source.cardId, variant.id, source.locationId, source.status)
+        if (destination == null || destination.id == source.id) {
+            collection.updateAllocation(
+                source.copy(
+                    variantId = variant.id,
+                    variantDisplayName = variant.displayName,
+                    variantResolution = VariantResolutionState.RESOLVED,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        } else {
+            collection.updateAllocation(
+                destination.copy(
+                    quantity = destination.quantity + source.quantity,
+                    variantDisplayName = variant.displayName,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+            collection.deleteAllocation(source.id)
+        }
+    }
 
     suspend fun moveAllocation(allocationId: Long, quantity: Int, destinationId: Long) {
         collectionDb.withTransaction {
             val source = collection.allocationById(allocationId) ?: return@withTransaction
             if (source.locationId == destinationId) return@withTransaction
             val moving = quantity.coerceIn(1, source.quantity)
-            val destination = collection.allocation(source.cardId, source.variant, destinationId, source.status)
-            collection.upsertAllocation(
-                destination?.copy(quantity = destination.quantity + moving, updatedAt = System.currentTimeMillis())
-                    ?: source.copy(id = 0, locationId = destinationId, quantity = moving, updatedAt = System.currentTimeMillis())
-            )
+            // Unresolved rows deliberately never coalesce by their legacy display label.
+            // A label is presentation/reconciliation input, not a variant identity.
+            val destination = source.variantId?.let {
+                collection.resolvedAllocation(source.cardId, it, destinationId, source.status)
+            }
+            if (destination == null) {
+                collection.insertAllocation(
+                    source.copy(id = 0, locationId = destinationId, quantity = moving, updatedAt = System.currentTimeMillis())
+                )
+            } else {
+                collection.updateAllocation(
+                    destination.copy(quantity = destination.quantity + moving, updatedAt = System.currentTimeMillis())
+                )
+            }
             if (moving == source.quantity) collection.deleteAllocation(source.id)
-            else collection.upsertAllocation(source.copy(quantity = source.quantity - moving, updatedAt = System.currentTimeMillis()))
+            else collection.updateAllocation(
+                source.copy(quantity = source.quantity - moving, updatedAt = System.currentTimeMillis())
+            )
         }
     }
-
-    suspend fun defaultLocation(): LocationEntity? = collection.firstLocation()
 }
