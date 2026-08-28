@@ -3,6 +3,7 @@
     "name": "Pokemon TCG Scanner",
     "slug": "pokemon-tcg-scanner",
     "version": "1.0.0",
+    "newArchEnabled": false,
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -18,6 +19,10 @@
         "backgroundColor": "#1a1a2e"
       },
       "package": "com.pokemontcgscanner.app",
+      "versionCode": 1,
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO"
+      ],
       "permissions": [
         "CAMERA"
       ]
@@ -27,7 +32,8 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow Pokemon TCG Scanner to use the camera to scan cards."
+          "cameraPermission": "Allow Pokemon TCG Scanner to use the camera to scan cards.",
+          "recordAudioAndroid": false
         }
       ],
       "expo-font",

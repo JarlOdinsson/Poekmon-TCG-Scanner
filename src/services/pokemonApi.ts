@@ -27,6 +27,14 @@ function getHeaders(): Record<string, string> {
 }
 
 /**
+ * Convert a printed collector number such as "032/197" to the value used by
+ * the Pokemon TCG API ("32").
+ */
+function normalizeCollectorNumber(value: string): string {
+  return value.trim().split('/')[0].replace(/^0+(?=\d)/, '');
+}
+
+/**
  * Search for a card by collector number and/or name.
  * Checks cache first, then hits the API.
  */
@@ -41,7 +49,8 @@ export async function findCard(
     // Filter cached results for better match
     const filtered = cached.filter((c) => {
       const numberMatch = collectorNumber
-        ? c.collectorNumber.replace(/^0+/, '') === collectorNumber.replace(/^0+/, '')
+        ? normalizeCollectorNumber(c.collectorNumber) ===
+          normalizeCollectorNumber(collectorNumber)
         : true;
       const nameMatch = name
         ? c.name.toLowerCase().includes(name.toLowerCase())
@@ -55,8 +64,8 @@ export async function findCard(
   const queryParts: string[] = [];
 
   if (collectorNumber) {
-    // Normalize: remove leading zeros for comparison
-    const cleanNum = collectorNumber.replace(/^0+/, '');
+    // The API stores the number portion, not the printed "number/set total".
+    const cleanNum = normalizeCollectorNumber(collectorNumber);
     queryParts.push(`number:${cleanNum}`);
   }
 
@@ -80,7 +89,7 @@ export async function findCard(
     // Fallback: try just the number without name
     if (collectorNumber && name) {
       try {
-        return await apiSearch(`number:${collectorNumber.replace(/^0+/, '')}`);
+        return await apiSearch(`number:${normalizeCollectorNumber(collectorNumber)}`);
       } catch {
         return [];
       }

@@ -15,9 +15,15 @@ dist/
 .metro-health-check*
 
 # Build
-android/
 ios/
 web-build/
+release/*.apk
+
+# Native Android local/generated files
+android/.gradle/
+android/**/build/
+android/local.properties
+android/app/debug.keystore
 
 # Environment
 .env

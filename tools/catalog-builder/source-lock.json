@@ -1,0 +1,9 @@
+{
+  "source": "tcgdex/cards-database",
+  "tag": "v2.47.0",
+  "commit": "649339eb6263dd378dbc8f155c567e7d3f2da894",
+  "archive": "https://github.com/tcgdex/cards-database/archive/649339eb6263dd378dbc8f155c567e7d3f2da894.zip",
+  "assetIndex": "https://assets.tcgdex.net/datas.json",
+  "assetIndexSha256": "2a91112e10f238b8aca429499b83f8cd72b9a6c7bdd125a2006743129eb7b9e8",
+  "compiler": "bun@1.2.22"
+}

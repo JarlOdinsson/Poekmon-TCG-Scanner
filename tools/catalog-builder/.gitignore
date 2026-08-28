@@ -1,0 +1,4 @@
+source/tcgdex/
+source/cache/
+__pycache__/
+*.pyc
