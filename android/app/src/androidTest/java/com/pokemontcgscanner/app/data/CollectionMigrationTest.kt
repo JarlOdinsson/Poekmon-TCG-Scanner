@@ -44,15 +44,19 @@ class CollectionMigrationTest {
         val repository = AppRepository(context)
         repository.initialize()
         repository.initialize()
+        val nextLocationId = repository.createLocation("Post-migration Box", "STORAGE")
+        assertEquals(6L, nextLocationId)
 
         SQLiteDatabase.openDatabase(context.getDatabasePath(databaseName).absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
             assertEquals(2, db.version)
             assertEquals(1, scalar(db, "SELECT COUNT(*) FROM locations WHERE id=5 AND name='Legacy Binder'"))
+            assertEquals(1, scalar(db, "SELECT COUNT(*) FROM locations WHERE id=6 AND name='Post-migration Box'"))
             assertEquals(1, scalar(db, "SELECT COUNT(*) FROM scan_sessions WHERE id=7"))
-            assertEquals(1, scalar(db, "SELECT COUNT(*) FROM scan_events WHERE id=8 AND variantDisplayName='Normal'"))
+            assertEquals(1, scalar(db, "SELECT COUNT(*) FROM scan_events WHERE id=8 AND variantDisplayName='Normal' AND variantId IS NOT NULL"))
             assertEquals(1, scalar(db, "SELECT COUNT(*) FROM review_items WHERE id=9 AND resolved=0"))
             assertEquals(3, scalar(db, "SELECT COUNT(*) FROM allocations"))
             assertEquals(9, scalar(db, "SELECT SUM(quantity) FROM allocations"))
+            assertEquals("ok", db.rawQuery("PRAGMA integrity_check", null).use { cursor -> cursor.moveToFirst(); cursor.getString(0) })
 
             db.rawQuery("SELECT variantId,variantResolution,quantity FROM allocations WHERE id=10", null).use { cursor ->
                 cursor.moveToFirst()

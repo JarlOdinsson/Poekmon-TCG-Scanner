@@ -5,5 +5,14 @@
   "archive": "https://github.com/tcgdex/cards-database/archive/649339eb6263dd378dbc8f155c567e7d3f2da894.zip",
   "assetIndex": "https://assets.tcgdex.net/datas.json",
   "assetIndexSha256": "2a91112e10f238b8aca429499b83f8cd72b9a6c7bdd125a2006743129eb7b9e8",
-  "compiler": "bun@1.2.22"
+  "compiler": "bun@1.2.22",
+  "variantEvidence": {
+    "source": "TCGplayer catalog via TCGCSV",
+    "categoryId": 3,
+    "documentation": "https://tcgcsv.com/docs",
+    "groupsEndpoint": "https://tcgcsv.com/tcgplayer/3/groups",
+    "retrievedAt": "2026-08-28T22:47:15.899576Z",
+    "file": "variant-evidence.json",
+    "sha256": "0d852d332d263858cb326db87d07b098b88f9b986d63c5113d5a3567203b86e1"
+  }
 }

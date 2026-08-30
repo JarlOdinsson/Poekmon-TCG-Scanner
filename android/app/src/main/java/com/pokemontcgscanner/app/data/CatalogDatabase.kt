@@ -5,10 +5,12 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import androidx.core.util.AtomicFile
 import java.io.File
+import java.io.InputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
@@ -28,18 +30,29 @@ data class CardEntity(
     val language: String = "en",
     val standardLegal: Boolean = false,
     val expandedLegal: Boolean = false,
-    val imageUrl: String = ""
+    val imageUrl: String = "",
+    val setPrintedTotal: Int = 0,
+    val setTotal: Int = 0
 )
 
 data class CardVariant(
     val id: String,
     val cardId: String,
     val sourceId: String?,
-    val displayName: String
-)
+    val displayName: String,
+    val type: String = "",
+    val evidenceStatus: String = "verified",
+    val provenanceSource: String = "tcgdex"
+) {
+    val isUnclassified: Boolean
+        get() = evidenceStatus == "unclassified" || type == "unclassified"
+}
+
+data class CatalogIdentities(val cardIds: Set<String>, val variantIds: Set<String>)
 
 class CardDao internal constructor(private val context: Context) {
-    fun observeAll(): Flow<List<CardEntity>> = flow { emit(loadAll()) }.flowOn(Dispatchers.IO)
+    private val revision = MutableStateFlow(0)
+    fun observeAll(): Flow<List<CardEntity>> = revision.map { loadAll() }.flowOn(Dispatchers.IO)
 
     suspend fun search(query: String): List<CardEntity> = withContext(Dispatchers.IO) {
         ensureInstalled()
@@ -65,11 +78,39 @@ class CardDao internal constructor(private val context: Context) {
         }
     }
 
+    suspend fun catalogVersion(): Int = withContext(Dispatchers.IO) {
+        ensureInstalled()
+        installedVersion(context.getDatabasePath(DATABASE_NAME))
+    }
+
+    suspend fun identities(): CatalogIdentities = withContext(Dispatchers.IO) {
+        ensureInstalled()
+        openReadOnly().use { database ->
+            val cardIds = database.rawQuery("SELECT internal_id FROM cards", null).use { cursor ->
+                buildSet(cursor.count) { while (cursor.moveToNext()) add(cursor.getString(0)) }
+            }
+            val variantIds = database.rawQuery("SELECT id FROM card_variants", null).use { cursor ->
+                buildSet(cursor.count) { while (cursor.moveToNext()) add(cursor.getString(0)) }
+            }
+            CatalogIdentities(cardIds, variantIds)
+        }
+    }
+
+    suspend fun installUpdate(input: InputStream): CatalogUpdateResult = withContext(Dispatchers.IO) {
+        ensureInstalled()
+        val result = CatalogUpdateInstaller(context).install(
+            input = input,
+            installedVersion = installedVersion(context.getDatabasePath(DATABASE_NAME))
+        )
+        revision.value += 1
+        result
+    }
+
     suspend fun variantsFor(cardId: String): List<CardVariant> = withContext(Dispatchers.IO) {
         ensureInstalled()
         openReadOnly().use { database ->
             database.rawQuery(
-                """SELECT id,card_id,source_variant_id,display_name
+                """SELECT id,card_id,source_variant_id,display_name,type,evidence_status,provenance_source
                    FROM card_variants WHERE card_id=? ORDER BY display_name,id""",
                 arrayOf(cardId)
             ).use { cursor ->
@@ -80,7 +121,10 @@ class CardDao internal constructor(private val context: Context) {
                                 id = cursor.getString(0),
                                 cardId = cursor.getString(1),
                                 sourceId = cursor.getString(2)?.ifBlank { null },
-                                displayName = cursor.getString(3)
+                                displayName = cursor.getString(3),
+                                type = cursor.getString(4),
+                                evidenceStatus = cursor.getString(5),
+                                provenanceSource = cursor.getString(6)
                             )
                         )
                     }
@@ -110,6 +154,8 @@ class CardDao internal constructor(private val context: Context) {
                     supertype = text("supertype"), subtypes = text("subtypes"), types = text("types"),
                     rarity = text("rarity"), regulationMark = text("regulationMark"), artist = text("artist"),
                     language = text("language"),
+                    setPrintedTotal = cursor.getInt(columns.getValue("setPrintedTotal")),
+                    setTotal = cursor.getInt(columns.getValue("setTotal")),
                     standardLegal = cursor.getInt(columns.getValue("standardLegal")) == 1,
                     expandedLegal = cursor.getInt(columns.getValue("expandedLegal")) == 1,
                     imageUrl = text("imageUrl")
@@ -130,7 +176,7 @@ class CardDao internal constructor(private val context: Context) {
         val expectedVersion = context.assets.open(MANIFEST_ASSET).bufferedReader().use {
             JSONObject(it.readText()).getInt("catalogVersion")
         }
-        if (target.exists() && installedVersion(target) == expectedVersion) return
+        if (target.exists() && installedVersion(target) >= expectedVersion) return
         target.parentFile?.mkdirs()
         val atomic = AtomicFile(target)
         val output = atomic.startWrite()

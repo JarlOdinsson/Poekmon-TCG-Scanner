@@ -21,6 +21,7 @@ object VariantResolutionState {
     const val PENDING = "PENDING"
     const val AMBIGUOUS = "AMBIGUOUS"
     const val UNMATCHED = "UNMATCHED"
+    const val UNCLASSIFIED = "UNCLASSIFIED"
 }
 
 @Entity(tableName = "locations")
@@ -111,7 +112,14 @@ interface CollectionDao {
     @Query("SELECT * FROM allocations WHERE cardId=:cardId AND variantId=:variantId AND locationId=:locationId AND status=:status LIMIT 1")
     suspend fun resolvedAllocation(cardId: String, variantId: String, locationId: Long, status: String): AllocationEntity?
     @Query("SELECT * FROM allocations WHERE variantId IS NULL ORDER BY id") suspend fun unresolvedAllocations(): List<AllocationEntity>
+    @Query("SELECT * FROM scan_events WHERE variantId IS NULL ORDER BY id") suspend fun unresolvedEvents(): List<ScanEventEntity>
     @Query("SELECT * FROM allocations WHERE id=:id") suspend fun allocationById(id: Long): AllocationEntity?
+    @Query("SELECT * FROM locations ORDER BY id") suspend fun allLocations(): List<LocationEntity>
+    @Query("SELECT * FROM allocations ORDER BY id") suspend fun allAllocations(): List<AllocationEntity>
+    @Query("SELECT * FROM scan_sessions ORDER BY id") suspend fun allSessions(): List<ScanSessionEntity>
+    @Query("SELECT * FROM scan_events ORDER BY id") suspend fun allEvents(): List<ScanEventEntity>
+    @Query("SELECT * FROM review_items ORDER BY id") suspend fun allReviewItems(): List<ReviewItemEntity>
+    @Query("UPDATE locations SET name=:name, type=:type WHERE id=:id") suspend fun updateLocation(id: Long, name: String, type: String)
 
     @Insert suspend fun insertLocation(location: LocationEntity): Long
     @Insert suspend fun insertSession(session: ScanSessionEntity): Long
@@ -119,9 +127,15 @@ interface CollectionDao {
     @Insert suspend fun insertReviewItem(item: ReviewItemEntity): Long
     @Insert(onConflict = OnConflictStrategy.ABORT) suspend fun insertAllocation(allocation: AllocationEntity): Long
     @Update suspend fun updateAllocation(allocation: AllocationEntity)
+    @Update suspend fun updateEvent(event: ScanEventEntity)
     @Query("UPDATE scan_sessions SET endedAt=:endedAt WHERE id=:id") suspend fun endSession(id: Long, endedAt: Long)
     @Query("UPDATE review_items SET resolved=1 WHERE id=:id") suspend fun resolveReviewItem(id: Long)
     @Query("DELETE FROM allocations WHERE id=:id") suspend fun deleteAllocation(id: Long)
+    @Query("DELETE FROM review_items") suspend fun clearReviewItems()
+    @Query("DELETE FROM scan_events") suspend fun clearEvents()
+    @Query("DELETE FROM scan_sessions") suspend fun clearSessions()
+    @Query("DELETE FROM allocations") suspend fun clearAllocations()
+    @Query("DELETE FROM locations") suspend fun clearLocations()
 }
 
 @Database(

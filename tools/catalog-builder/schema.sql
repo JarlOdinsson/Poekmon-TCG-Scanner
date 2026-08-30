@@ -89,6 +89,9 @@ CREATE TABLE card_variants (
     is_stamped INTEGER NOT NULL DEFAULT 0 CHECK (is_stamped IN (0, 1)),
     is_prerelease INTEGER NOT NULL DEFAULT 0 CHECK (is_prerelease IN (0, 1)),
     language TEXT NOT NULL,
+    evidence_status TEXT NOT NULL CHECK (evidence_status IN ('verified', 'unclassified')),
+    provenance_source TEXT NOT NULL,
+    provenance_ref TEXT NOT NULL DEFAULT '',
     tcgplayer_id TEXT NOT NULL DEFAULT '',
     cardmarket_id TEXT NOT NULL DEFAULT '',
     cardtrader_id TEXT NOT NULL DEFAULT ''
@@ -122,6 +125,8 @@ SELECT
     c.regulation_mark AS regulationMark,
     c.artist AS artist,
     c.language AS language,
+    s.printed_total AS setPrintedTotal,
+    s.total AS setTotal,
     COALESCE((SELECT group_concat(v.display_name, ',') FROM card_variants v WHERE v.card_id = c.internal_id), '') AS variants,
     c.standard_legal AS standardLegal,
     c.expanded_legal AS expandedLegal,

@@ -1,17 +1,20 @@
 {
-  "catalogVersion": 1,
-  "schemaVersion": 1,
+  "catalogVersion": 2,
+  "schemaVersion": 2,
   "language": "en",
   "source": "tcgdex",
   "sourceVersion": "v2.47.0",
   "sourceCommit": "649339eb6263dd378dbc8f155c567e7d3f2da894",
   "assetIndexSha256": "2a91112e10f238b8aca429499b83f8cd72b9a6c7bdd125a2006743129eb7b9e8",
+  "variantEvidenceSha256": "0d852d332d263858cb326db87d07b098b88f9b986d63c5113d5a3567203b86e1",
   "cardCount": 20964,
   "setCount": 199,
-  "variantCount": 26282,
-  "databaseFile": "catalog-en-v1.sqlite",
-  "archiveFile": "catalog-en-v1.sqlite.zip",
-  "databaseSha256": "ee19477b16c299472bece53b8cb8ce3b8993a7f5a3fbd6301eb5814a36aec1b6",
-  "sha256": "297e583d72d7e107a29f2e86a9503e4343791147c901dcbe5727a631d1212e05",
-  "builtAt": "2026-08-28T12:35:15.884621Z"
+  "variantCount": 37780,
+  "verifiedVariantCount": 37734,
+  "unclassifiedVariantCount": 46,
+  "databaseFile": "catalog-en-v2.sqlite",
+  "archiveFile": "catalog-en-v2.sqlite.zip",
+  "databaseSha256": "3d9a757399de981bdc14e27bdb263324db7611dee653fdde28734ed375f7e32e",
+  "sha256": "aa1fd58e7690c2a8dfcf3e873b8bd50de241f0c05be8bb8edad7c90492670843",
+  "builtAt": "2026-08-29T04:57:06.879818Z"
 }

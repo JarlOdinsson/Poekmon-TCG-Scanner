@@ -22,6 +22,7 @@ def validate_database(connection: sqlite3.Connection) -> ValidationResult:
         "empty set names": "SELECT COUNT(*) FROM sets WHERE trim(name)=''",
         "missing collector numbers": "SELECT COUNT(*) FROM cards WHERE trim(collector_number)=''",
         "malformed variants": "SELECT COUNT(*) FROM card_variants WHERE trim(type)='' OR trim(display_name)=''",
+        "variants without provenance": "SELECT COUNT(*) FROM card_variants WHERE trim(provenance_source)='' OR trim(evidence_status)=''",
         "orphan variants": "SELECT COUNT(*) FROM card_variants v LEFT JOIN cards c ON c.internal_id=v.card_id WHERE c.internal_id IS NULL",
     }
     for label, sql in checks.items():
@@ -37,8 +38,14 @@ def validate_database(connection: sqlite3.Connection) -> ValidationResult:
         "SELECT COUNT(*) FROM cards c WHERE NOT EXISTS (SELECT 1 FROM card_variants v WHERE v.card_id=c.internal_id)"
     ).fetchone()[0]
     if no_variants:
+        result.errors.append(f"cards without a catalogue variant identity: {no_variants}")
+
+    unclassified = connection.execute(
+        "SELECT COUNT(*) FROM card_variants WHERE evidence_status='unclassified'"
+    ).fetchone()[0]
+    if unclassified:
         result.warnings.append(
-            f"cards without source-supported variant data: {no_variants}; no variants were invented"
+            f"cards with an explicit unclassified physical finish: {unclassified}; user confirmation is required"
         )
 
     no_images = connection.execute("SELECT COUNT(*) FROM cards WHERE image_small_url='' ").fetchone()[0]

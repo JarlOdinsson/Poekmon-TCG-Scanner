@@ -13,12 +13,19 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 data class RecognitionSignals(
     val rawText: String,
     val collectorNumber: String?,
+    val collectorTotal: Int?,
     val likelyName: String?,
     val setCode: String?
 )
 
 data class RankedCandidate(val card: CardEntity, val score: Float, val reasons: List<String>)
-data class CardRecognitionResult(val signals: RecognitionSignals, val candidates: List<RankedCandidate>)
+enum class RecognitionConfidence { NONE, LOW, MEDIUM, HIGH }
+data class CardRecognitionResult(
+    val signals: RecognitionSignals,
+    val candidates: List<RankedCandidate>,
+    val confidence: RecognitionConfidence,
+    val scoreMargin: Float
+)
 
 class CardRecognitionEngine(private val context: Context) {
     suspend fun recognize(imagePath: String, catalog: List<CardEntity>): CardRecognitionResult {
@@ -37,45 +44,73 @@ class CardRecognitionEngine(private val context: Context) {
 }
 
 object CandidateRanker {
-    private val printedNumber = Regex("(?i)\\b(\\d{1,3})\\s*[/|]\\s*(\\d{1,3})\\b")
+    private val printedNumber = Regex("(?i)\\b((?:TG|GG|RC|SV)?\\s*[0O]*\\d{1,3})\\s*[/|]\\s*([0O]*\\d{2,3})\\b")
 
     fun rank(rawText: String, catalog: List<CardEntity>): CardRecognitionResult {
         val normalizedText = normalize(rawText)
-        val number = printedNumber.find(rawText)?.groupValues?.get(1)?.trimStart('0')?.ifEmpty { "0" }
-        val setCode = catalog.map { it.setCode }.distinct().firstOrNull { code ->
+        val printed = printedNumber.findAll(rawText).toList().lastOrNull()
+        val number = printed?.groupValues?.get(1)?.let(::normalizeCollectorNumber)
+        val total = printed?.groupValues?.get(2)?.replace('O', '0', true)?.toIntOrNull()
+        val setCode = catalog.map { it.setCode }.filter { it.length >= 2 }.distinct()
+            .sortedByDescending { it.length }.firstOrNull { code ->
             Regex("(?i)(^|[^A-Z])${Regex.escape(code)}([^A-Z]|$)").containsMatchIn(rawText)
         }
-        val likelyName = catalog.map { it.name }.distinct().sortedByDescending { it.length }.firstOrNull { name ->
+        val names = catalog.map { it.name }.distinct()
+        val exactName = names.sortedByDescending { it.length }.firstOrNull { name ->
             normalizedText.contains(normalize(name))
-        } ?: bestLineName(rawText, catalog)
+        }
+        val nameSimilarities = if (exactName == null) {
+            names.associateWith { name -> bestNameSimilarity(rawText, name) }
+        } else {
+            emptyMap()
+        }
+        val likelyName = exactName ?: nameSimilarities.maxByOrNull { it.value }
+            ?.takeIf { it.value >= 0.62f }?.key
 
-        val signals = RecognitionSignals(rawText, number, likelyName, setCode)
+        val signals = RecognitionSignals(rawText, number, total, likelyName, setCode)
         val ranked = catalog.mapNotNull { card ->
             var score = 0f
             val reasons = mutableListOf<String>()
-            if (number != null && card.collectorNumber.trimStart('0').ifEmpty { "0" } == number) {
-                score += 0.56f; reasons += "collector number"
+            val numberMatches = number != null && normalizeCollectorNumber(card.collectorNumber) == number
+            val totalMatches = total != null && total > 0 && (card.setPrintedTotal == total || card.setTotal == total)
+            if (numberMatches) {
+                score += 0.38f; reasons += "collector number"
+            }
+            if (totalMatches) {
+                score += 0.30f; reasons += "set total"
+            }
+            if (numberMatches && totalMatches) {
+                score += 0.08f
             }
             if (setCode != null && card.setCode.equals(setCode, true)) {
-                score += 0.18f; reasons += "set code"
+                score += 0.24f; reasons += "set code"
             }
             val nameScore = when {
-                likelyName != null && card.name.equals(likelyName, true) -> 0.36f
-                normalizedText.contains(normalize(card.name)) -> 0.32f
-                else -> bestNameSimilarity(rawText, card.name) * 0.22f
+                likelyName != null && card.name.equals(likelyName, true) -> 0.42f
+                normalizedText.contains(normalize(card.name)) -> 0.38f
+                else -> (nameSimilarities[card.name] ?: bestNameSimilarity(rawText, card.name)) * 0.26f
             }
-            if (nameScore >= 0.1f) { score += nameScore; reasons += "name text" }
+            if (nameScore >= 0.13f) { score += nameScore; reasons += "name text" }
             if (card.regulationMark.isNotBlank() && Regex("(?i)\\b${Regex.escape(card.regulationMark)}\\b").containsMatchIn(rawText)) {
                 score += 0.04f; reasons += "regulation mark"
             }
-            if (score >= 0.12f) RankedCandidate(card, score.coerceAtMost(1f), reasons) else null
-        }.sortedWith(compareByDescending<RankedCandidate> { it.score }.thenBy { it.card.setName }).take(12)
-        return CardRecognitionResult(signals, ranked)
+            if (score >= 0.18f) RankedCandidate(card, score.coerceAtMost(1f), reasons) else null
+        }.sortedWith(
+            compareByDescending<RankedCandidate> { it.score }
+                .thenByDescending { it.reasons.size }
+                .thenBy { it.card.setName }
+                .thenBy { it.card.collectorNumber }
+        ).take(12)
+        val margin = ((ranked.firstOrNull()?.score ?: 0f) - (ranked.getOrNull(1)?.score ?: 0f)).coerceAtLeast(0f)
+        val top = ranked.firstOrNull()?.score ?: 0f
+        val confidence = when {
+            ranked.isEmpty() -> RecognitionConfidence.NONE
+            top >= 0.78f && margin >= 0.12f -> RecognitionConfidence.HIGH
+            top >= 0.58f && margin >= 0.06f -> RecognitionConfidence.MEDIUM
+            else -> RecognitionConfidence.LOW
+        }
+        return CardRecognitionResult(signals, ranked, confidence, margin)
     }
-
-    private fun bestLineName(rawText: String, catalog: List<CardEntity>): String? = catalog.map { card ->
-        card.name to bestNameSimilarity(rawText, card.name)
-    }.maxByOrNull { it.second }?.takeIf { it.second >= 0.62f }?.first
 
     private fun bestNameSimilarity(rawText: String, name: String): Float = rawText.lineSequence()
         .map { similarity(normalize(it), normalize(name)) }.maxOrNull() ?: 0f
@@ -94,6 +129,13 @@ object CandidateRanker {
             }
         }
         return 1f - previous[right.length].toFloat() / maxOf(left.length, right.length)
+    }
+
+    internal fun normalizeCollectorNumber(value: String): String {
+        val compact = value.uppercase().replace(Regex("[^A-Z0-9]"), "").replace('O', '0')
+        val prefix = compact.takeWhile { it.isLetter() }
+        val digits = compact.drop(prefix.length).trimStart('0').ifEmpty { "0" }
+        return prefix + digits
     }
 
     private fun normalize(value: String) = value.lowercase().replace("é", "e").replace(Regex("[^a-z0-9]+"), " ").trim()

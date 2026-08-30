@@ -25,8 +25,11 @@ DEFAULT_SOURCE_VERSION = "v2.47.0"
 SOURCE_COMMIT = "649339eb6263dd378dbc8f155c567e7d3f2da894"
 ASSET_INDEX_URL = "https://assets.tcgdex.net/datas.json"
 ASSET_INDEX_SHA256 = "2a91112e10f238b8aca429499b83f8cd72b9a6c7bdd125a2006743129eb7b9e8"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 LANGUAGE = "en"
+VARIANT_EVIDENCE = ROOT / "variant-evidence.json"
+# Updated alongside source-lock.json whenever the committed evidence overlay changes.
+VARIANT_EVIDENCE_SHA256 = "0d852d332d263858cb326db87d07b098b88f9b986d63c5113d5a3567203b86e1"
 
 LEGACY_INTERNAL_IDS = {
     "sv03.5-007": "sv3pt5-7",
@@ -47,7 +50,7 @@ LEGACY_INTERNAL_IDS = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build the production CardDex English catalogue")
     parser.add_argument("--source-version", default=DEFAULT_SOURCE_VERSION)
-    parser.add_argument("--catalog-version", type=int, default=1)
+    parser.add_argument("--catalog-version", type=int, default=2)
     parser.add_argument("--source-dir", type=Path, default=ROOT / "source" / "tcgdex")
     parser.add_argument("--snapshot", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "output")
@@ -212,8 +215,9 @@ def insert_variant(connection: sqlite3.Connection, card_id: str, variant: dict[s
     connection.execute(
         """INSERT INTO card_variants(
             id, card_id, source_variant_id, type, subtype, display_name, size, foil, stamps_json,
-            is_first_edition, is_stamped, is_prerelease, language, tcgplayer_id, cardmarket_id, cardtrader_id
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            is_first_edition, is_stamped, is_prerelease, language, evidence_status, provenance_source,
+            provenance_ref, tcgplayer_id, cardmarket_id, cardtrader_id
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             variant_id,
             card_id,
@@ -228,6 +232,9 @@ def insert_variant(connection: sqlite3.Connection, card_id: str, variant: dict[s
             int(bool(stamps)),
             int(any("pre" in stamp.lower() and "release" in stamp.lower() for stamp in stamps)),
             LANGUAGE,
+            "verified",
+            "tcgdex",
+            source_variant_id,
             str(third_party.get("tcgplayer") or ""),
             str(third_party.get("cardmarket") or ""),
             str(third_party.get("cardtrader") or ""),
@@ -235,10 +242,71 @@ def insert_variant(connection: sqlite3.Connection, card_id: str, variant: dict[s
     )
 
 
+def insert_evidence_variant(connection: sqlite3.Connection, card_id: str, variant: dict[str, Any]) -> None:
+    source_variant_id = str(variant["sourceVariantId"])
+    stamps = [str(item) for item in variant.get("stamps") or []]
+    normalized = {
+        "type": str(variant["type"]),
+        "subtype": str(variant.get("subtype") or ""),
+        "foil": str(variant.get("foil") or ""),
+        "stamp": stamps,
+    }
+    connection.execute(
+        """INSERT INTO card_variants(
+            id, card_id, source_variant_id, type, subtype, display_name, size, foil, stamps_json,
+            is_first_edition, is_stamped, is_prerelease, language, evidence_status, provenance_source,
+            provenance_ref, tcgplayer_id, cardmarket_id, cardtrader_id
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            f"{card_id}::{source_variant_id}", card_id, source_variant_id, normalized["type"],
+            normalized["subtype"], variant_display(normalized), str(variant.get("size") or "standard"),
+            normalized["foil"], compact_json(stamps, []),
+            int("1st-edition" in stamps), int(bool(stamps)), int("prerelease" in stamps), LANGUAGE,
+            "verified", str(variant.get("source") or "tcgplayer-via-tcgcsv"),
+            str(variant.get("productId") or ""), str(variant.get("productId") or ""), "", "",
+        ),
+    )
+
+
+def insert_unclassified_variant(connection: sqlite3.Connection, card_id: str, source_id: str) -> None:
+    source_variant_id = "unclassified-physical"
+    connection.execute(
+        """INSERT INTO card_variants(
+            id, card_id, source_variant_id, type, subtype, display_name, size, foil, stamps_json,
+            is_first_edition, is_stamped, is_prerelease, language, evidence_status, provenance_source,
+            provenance_ref, tcgplayer_id, cardmarket_id, cardtrader_id
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            f"{card_id}::{source_variant_id}", card_id, source_variant_id, "unclassified", "",
+            "Finish not catalogued", "standard", "", "[]", 0, 0, 0, LANGUAGE, "unclassified",
+            "tcgdex-card-existence", source_id, "", "", "",
+        ),
+    )
+
+
+def load_variant_evidence(source_version: str) -> dict[str, Any]:
+    if not VARIANT_EVIDENCE.exists():
+        raise RuntimeError(f"Missing committed variant evidence overlay: {VARIANT_EVIDENCE}")
+    actual_sha = sha256(VARIANT_EVIDENCE)
+    if VARIANT_EVIDENCE_SHA256 == "PENDING" or actual_sha != VARIANT_EVIDENCE_SHA256:
+        raise RuntimeError(
+            f"Variant evidence checksum mismatch: expected {VARIANT_EVIDENCE_SHA256}, got {actual_sha}"
+        )
+    evidence = json.loads(VARIANT_EVIDENCE.read_text(encoding="utf-8"))
+    if evidence.get("schemaVersion") != 1:
+        raise RuntimeError("Unsupported variant evidence schema")
+    if evidence.get("tcgdexSourceVersion") != source_version:
+        raise RuntimeError("Variant evidence was generated for a different TCGdex source version")
+    return evidence
+
+
 def build_database(snapshot: Path, database: Path, catalog_version: int, source_version: str) -> dict[str, Any]:
     print(f"Loading {snapshot}")
     with snapshot.open("r", encoding="utf-8") as source_file:
         source = json.load(source_file)
+    evidence = load_variant_evidence(source_version)
+    evidence_by_card = evidence.get("variantsByCardSourceId") or {}
+    unclassified_source_ids = set(evidence.get("unmatchedCards") or [])
 
     physical_series = [item for item in source["series"] if is_physical_series(item)]
     series_ids = {item["id"] for item in physical_series}
@@ -261,6 +329,7 @@ def build_database(snapshot: Path, database: Path, catalog_version: int, source_
             "sourceVersion": source_version,
             "sourceCommit": SOURCE_COMMIT,
             "assetIndexSha256": ASSET_INDEX_SHA256,
+            "variantEvidenceSha256": VARIANT_EVIDENCE_SHA256,
             "builtAt": built_at,
         }
         connection.executemany("INSERT INTO catalog_metadata(key,value) VALUES(?,?)", metadata.items())
@@ -319,8 +388,15 @@ def build_database(snapshot: Path, database: Path, catalog_version: int, source_
                     str(set_item.get("releaseDate") or ""), str(card.get("updated") or ""),
                 ),
             )
-            for index, variant in enumerate(supported_variants(card)):
+            source_supported = list(supported_variants(card))
+            for index, variant in enumerate(source_supported):
                 insert_variant(connection, card_id, variant, index)
+            if not source_supported:
+                evidence_variants = evidence_by_card.get(source_id) or []
+                for variant in evidence_variants:
+                    insert_evidence_variant(connection, card_id, variant)
+                if not evidence_variants and source_id in unclassified_source_ids:
+                    insert_unclassified_variant(connection, card_id, source_id)
             connection.execute(
                 "INSERT INTO card_search(internal_id,card_name,collector_number,set_name,set_code,rarity,artist) VALUES(?,?,?,?,?,?,?)",
                 (card_id, card["name"], local_number, set_item["name"], code, str(card.get("rarity") or ""), str(card.get("illustrator") or "")),
@@ -336,6 +412,12 @@ def build_database(snapshot: Path, database: Path, catalog_version: int, source_
             "setCount": connection.execute("SELECT COUNT(*) FROM sets").fetchone()[0],
             "cardCount": connection.execute("SELECT COUNT(*) FROM cards").fetchone()[0],
             "variantCount": connection.execute("SELECT COUNT(*) FROM card_variants").fetchone()[0],
+            "verifiedVariantCount": connection.execute(
+                "SELECT COUNT(*) FROM card_variants WHERE evidence_status='verified'"
+            ).fetchone()[0],
+            "unclassifiedVariantCount": connection.execute(
+                "SELECT COUNT(*) FROM card_variants WHERE evidence_status='unclassified'"
+            ).fetchone()[0],
         }
         if validation.errors:
             raise RuntimeError("Catalogue validation failed:\n" + "\n".join(validation.errors))
@@ -364,6 +446,8 @@ def main() -> int:
     archive = args.output_dir / f"{stem}.sqlite.zip"
     manifest_file = args.output_dir / "catalog-manifest.json"
     checksum_file = args.output_dir / f"{stem}.sqlite.zip.sha256"
+    bundle_file = args.output_dir / f"{stem}.bundle.zip"
+    bundle_checksum_file = args.output_dir / f"{stem}.bundle.zip.sha256"
     report_file = args.output_dir / "catalog-build-report.json"
 
     report = build_database(snapshot, database, args.catalog_version, args.source_version)
@@ -387,9 +471,12 @@ def main() -> int:
         "sourceVersion": args.source_version,
         "sourceCommit": SOURCE_COMMIT,
         "assetIndexSha256": ASSET_INDEX_SHA256,
+        "variantEvidenceSha256": VARIANT_EVIDENCE_SHA256,
         "cardCount": report["cardCount"],
         "setCount": report["setCount"],
         "variantCount": report["variantCount"],
+        "verifiedVariantCount": report["verifiedVariantCount"],
+        "unclassifiedVariantCount": report["unclassifiedVariantCount"],
         "databaseFile": database.name,
         "archiveFile": archive.name,
         "databaseSha256": database_sha,
@@ -399,6 +486,14 @@ def main() -> int:
     manifest_file.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     report_file.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     checksum_file.write_text(f"{archive_sha}  {archive.name}\n", encoding="utf-8")
+
+    with zipfile.ZipFile(bundle_file, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
+        bundle.write(manifest_file, "catalog-manifest.json")
+        bundle.write(database, database.name)
+    bundle_sha = sha256(bundle_file)
+    report.update({"bundleFile": bundle_file.name, "bundleSize": bundle_file.stat().st_size, "bundleSha256": bundle_sha})
+    report_file.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    bundle_checksum_file.write_text(f"{bundle_sha}  {bundle_file.name}\n", encoding="utf-8")
 
     args.android_assets_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(database, args.android_assets_dir / "catalog-en.sqlite")

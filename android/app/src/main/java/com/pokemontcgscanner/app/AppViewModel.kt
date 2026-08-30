@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.InputStream
 
 @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
 class AppViewModel(application: Application) : AndroidViewModel(application) {
@@ -46,6 +47,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (name.isNotBlank()) repository.createLocation(name, type)
     }
 
+    fun updateLocation(id: Long, name: String, type: String) = viewModelScope.launch {
+        repository.updateLocation(id, name, type)
+    }
+
     fun startSession(name: String, destination: Long) = viewModelScope.launch {
         repository.startSession(name.ifBlank { "Quick Scan" }, destination)
     }
@@ -60,9 +65,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         sessionId: Long? = activeSession.value?.id,
         reviewItemId: Long? = null,
         imagePath: String? = null,
+        confidence: Float = 1f,
         onDone: () -> Unit = {}
     ) = viewModelScope.launch {
-        repository.confirmAllocation(confirmation, status, sessionId, reviewItemId)
+        repository.confirmAllocation(confirmation, status, sessionId, reviewItemId, confidence)
         if (reviewItemId != null && imagePath != null) runCatching { File(imagePath).delete() }
         onDone()
     }
@@ -78,6 +84,30 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun moveAllocation(allocationId: Long, quantity: Int, destinationId: Long) = viewModelScope.launch {
         repository.moveAllocation(allocationId, quantity, destinationId)
+    }
+
+    fun setAllocationQuantity(allocationId: Long, quantity: Int) = viewModelScope.launch {
+        repository.setAllocationQuantity(allocationId, quantity)
+    }
+
+    fun changeAllocationStatus(allocationId: Long, status: String) = viewModelScope.launch {
+        repository.changeAllocationStatus(allocationId, status)
+    }
+
+    fun editAllocation(allocationId: Long, quantity: Int, status: String) = viewModelScope.launch {
+        repository.editAllocation(allocationId, quantity, status)
+    }
+
+    fun createBackup(onResult: (Result<String>) -> Unit) = viewModelScope.launch {
+        onResult(runCatching { repository.createBackup() })
+    }
+
+    fun restoreBackup(raw: String, onResult: (Result<Unit>) -> Unit) = viewModelScope.launch {
+        onResult(runCatching { repository.restoreBackup(raw) })
+    }
+
+    fun installCatalogUpdate(input: InputStream, onResult: (Result<com.pokemontcgscanner.app.data.CatalogUpdateResult>) -> Unit) = viewModelScope.launch {
+        onResult(runCatching { input.use { repository.installCatalogUpdate(it) } })
     }
 }
 

@@ -1,6 +1,7 @@
 package com.pokemontcgscanner.app.data
 
 import android.content.Context
+import java.io.InputStream
 import androidx.room.withTransaction
 import kotlinx.coroutines.flow.Flow
 
@@ -29,6 +30,7 @@ class AppRepository(context: Context) {
                 LocationEntity(name = "Bulk Box 1", type = "STORAGE", color = 0xFFFFB547)
             ).forEach { collection.insertLocation(it) }
         }
+        assertCollectionIntegrity()
     }
 
     suspend fun search(query: String): List<CardEntity> = cards.search(query.trim())
@@ -36,6 +38,10 @@ class AppRepository(context: Context) {
 
     suspend fun createLocation(name: String, type: String): Long =
         collection.insertLocation(LocationEntity(name = name.trim(), type = type))
+
+    suspend fun updateLocation(id: Long, name: String, type: String) {
+        if (id > 0 && name.isNotBlank()) collection.updateLocation(id, name.trim(), type)
+    }
 
     suspend fun startSession(name: String, destinationId: Long): Long =
         collection.insertSession(ScanSessionEntity(name = name, destinationId = destinationId))
@@ -46,7 +52,8 @@ class AppRepository(context: Context) {
         confirmation: ConfirmedAllocation,
         status: String,
         sessionId: Long?,
-        reviewItemId: Long?
+        reviewItemId: Long?,
+        confidence: Float = 1f
     ) = collectionDb.withTransaction {
         val existing = collection.resolvedAllocation(
             confirmation.cardId, confirmation.variantId, confirmation.locationId, status
@@ -57,6 +64,7 @@ class AppRepository(context: Context) {
                     cardId = confirmation.cardId,
                     variantId = confirmation.variantId,
                     variantDisplayName = confirmation.variantDisplayName,
+                    variantResolution = confirmation.variantResolution,
                     locationId = confirmation.locationId,
                     status = status,
                     quantity = confirmation.quantity
@@ -66,6 +74,7 @@ class AppRepository(context: Context) {
             collection.updateAllocation(
                 existing.copy(
                     variantDisplayName = confirmation.variantDisplayName,
+                    variantResolution = confirmation.variantResolution,
                     quantity = existing.quantity + confirmation.quantity,
                     updatedAt = System.currentTimeMillis()
                 )
@@ -79,7 +88,7 @@ class AppRepository(context: Context) {
                     variantId = confirmation.variantId,
                     variantDisplayName = confirmation.variantDisplayName,
                     quantity = confirmation.quantity,
-                    confidence = 1f
+                    confidence = confidence.coerceIn(0f, 1f)
                 )
             )
         }
@@ -100,7 +109,10 @@ class AppRepository(context: Context) {
     suspend fun resolveAllocationVariant(allocationId: Long, variant: CardVariant) {
         collectionDb.withTransaction {
             val source = collection.allocationById(allocationId) ?: return@withTransaction
-            if (source.cardId != variant.cardId || source.variantId != null) return@withTransaction
+            if (source.cardId != variant.cardId || variant.isUnclassified) return@withTransaction
+            if (source.variantId != null && source.variantResolution != VariantResolutionState.UNCLASSIFIED) {
+                return@withTransaction
+            }
             mergeOrResolve(source, variant)
         }
     }
@@ -122,6 +134,25 @@ class AppRepository(context: Context) {
                 }
             }
         }
+        collection.unresolvedEvents().forEach { legacy ->
+            val decision = VariantIdentity.reconcile(legacy.variantDisplayName, cards.variantsFor(legacy.cardId))
+            if (decision is LegacyVariantDecision.Resolved) {
+                collection.updateEvent(
+                    legacy.copy(
+                        variantId = decision.variant.id,
+                        variantDisplayName = decision.variant.displayName
+                    )
+                )
+            }
+        }
+    }
+
+    private suspend fun assertCollectionIntegrity() {
+        val issues = CollectionIntegrity.audit(
+            collection.allLocations(), collection.allAllocations(), collection.allSessions(),
+            collection.allEvents(), collection.allReviewItems()
+        )
+        check(issues.isEmpty()) { "Collection integrity check failed: ${issues.joinToString()}" }
     }
 
     private suspend fun mergeOrResolve(source: AllocationEntity, variant: CardVariant) {
@@ -131,7 +162,11 @@ class AppRepository(context: Context) {
                 source.copy(
                     variantId = variant.id,
                     variantDisplayName = variant.displayName,
-                    variantResolution = VariantResolutionState.RESOLVED,
+                    variantResolution = if (variant.isUnclassified) {
+                        VariantResolutionState.UNCLASSIFIED
+                    } else {
+                        VariantResolutionState.RESOLVED
+                    },
                     updatedAt = System.currentTimeMillis()
                 )
             )
@@ -172,4 +207,110 @@ class AppRepository(context: Context) {
             )
         }
     }
+
+    suspend fun setAllocationQuantity(allocationId: Long, quantity: Int) {
+        collectionDb.withTransaction {
+            val source = collection.allocationById(allocationId) ?: return@withTransaction
+            if (quantity <= 0) collection.deleteAllocation(source.id)
+            else collection.updateAllocation(source.copy(quantity = quantity, updatedAt = System.currentTimeMillis()))
+        }
+    }
+
+    suspend fun changeAllocationStatus(allocationId: Long, status: String) {
+        collectionDb.withTransaction {
+            val source = collection.allocationById(allocationId) ?: return@withTransaction
+            if (source.status == status) return@withTransaction
+            val destination = source.variantId?.let {
+                collection.resolvedAllocation(source.cardId, it, source.locationId, status)
+            }
+            if (destination == null) {
+                collection.updateAllocation(source.copy(status = status, updatedAt = System.currentTimeMillis()))
+            } else {
+                collection.updateAllocation(
+                    destination.copy(
+                        quantity = destination.quantity + source.quantity,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+                collection.deleteAllocation(source.id)
+            }
+        }
+    }
+
+    suspend fun editAllocation(allocationId: Long, quantity: Int, status: String) {
+        collectionDb.withTransaction {
+            val source = collection.allocationById(allocationId) ?: return@withTransaction
+            val destination = if (source.status != status) source.variantId?.let {
+                collection.resolvedAllocation(source.cardId, it, source.locationId, status)
+            } else null
+            when (val decision = CollectionEditing.plan(quantity, status, destination?.id)) {
+                AllocationEditDecision.Remove -> collection.deleteAllocation(source.id)
+                is AllocationEditDecision.Update -> collection.updateAllocation(
+                    source.copy(
+                        quantity = decision.quantity,
+                        status = decision.status,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+                is AllocationEditDecision.Merge -> {
+                    val target = destination?.takeIf { it.id == decision.destinationId }
+                        ?: return@withTransaction
+                    collection.updateAllocation(
+                        target.copy(
+                            quantity = target.quantity + decision.quantityToAdd,
+                            updatedAt = System.currentTimeMillis()
+                        )
+                    )
+                    collection.deleteAllocation(source.id)
+                }
+            }
+        }
+    }
+
+    suspend fun createBackup(): String = collectionDb.withTransaction {
+        CollectionBackupCodec.encode(
+            CollectionBackupSnapshot(
+                catalogVersion = cards.catalogVersion(),
+                locations = collection.allLocations(),
+                allocations = collection.allAllocations(),
+                sessions = collection.allSessions(),
+                events = collection.allEvents(),
+                reviewItems = collection.allReviewItems()
+            )
+        )
+    }
+
+    suspend fun restoreBackup(raw: String) {
+        val backup = CollectionBackupCodec.decode(raw)
+        require(backup.catalogVersion <= cards.catalogVersion()) {
+            "Backup requires a newer catalogue version (${backup.catalogVersion})"
+        }
+        val identities = cards.identities()
+        require(backup.allocations.all { it.cardId in identities.cardIds }) {
+            "Backup contains a collection card that is absent from this catalogue"
+        }
+        require(backup.allocations.all { it.variantId == null || it.variantId in identities.variantIds }) {
+            "Backup contains a variant that is absent from this catalogue"
+        }
+        require(backup.events.all { it.cardId in identities.cardIds }) {
+            "Backup contains scan history for a card absent from this catalogue"
+        }
+        require(backup.events.all { it.variantId == null || it.variantId in identities.variantIds }) {
+            "Backup contains scan history for a variant absent from this catalogue"
+        }
+        collectionDb.withTransaction {
+            collection.clearReviewItems()
+            collection.clearEvents()
+            collection.clearSessions()
+            collection.clearAllocations()
+            collection.clearLocations()
+            backup.locations.forEach { collection.insertLocation(it) }
+            backup.allocations.forEach { collection.insertAllocation(it) }
+            backup.sessions.forEach { collection.insertSession(it) }
+            backup.events.forEach { collection.insertEvent(it) }
+            backup.reviewItems.forEach { collection.insertReviewItem(it) }
+        }
+    }
+
+    suspend fun installCatalogUpdate(input: InputStream): CatalogUpdateResult = cards.installUpdate(input)
 }
